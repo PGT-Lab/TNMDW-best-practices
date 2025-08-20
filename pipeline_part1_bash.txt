@@ -1,0 +1,120 @@
+#################################################################
+# DNA Methylation Analysis Pipeline - Part 1 (Bash section)
+# Steps 1–21
+#################################################################
+
+echo "Step 1: Run FastQC before trimming"
+# Verify quality of fastq.gz files
+fastqc --noextract --threads 8 *fq.gz --outdir [PATH]
+
+echo "Step 2: Trim adapters with Trim Galore"
+# Parameter 'cores' can be adapted to computational power
+trim_galore --gzip --cores 2 --output_dir [PATH] --2colour 20 --paired $FQ1 $FQ2
+
+echo "Step 3: Run FastQC after trimming"
+fastqc --noextract --threads 8 *fq.gz --outdir [PATH]
+
+echo "Step 4 (Optional): Run MultiQC"
+multiqc . --outdir [PATH]
+
+
+#################################################################
+# Read Alignment
+#################################################################
+
+echo "Step 5: Align paired-end reads with BWA-Meth"
+# IMPORTANT: adjust read-group values (ID, PL, SM)
+bwameth.py --threads 5 \
+    --reference $REF \
+    --read-group '@RG\tID:XX\tPL:XX\tSM:XX' \
+    $FQ1 $FQ2 > some.bam
+
+echo "Step 6: Check alignment stats"
+samtools flagstat some.bam
+
+echo "Step 7: Convert BAM for downstream compatibility"
+samtools view -@ 3 -b some.bam > some_converted.bam
+
+echo "Step 8: Check stats after BAM conversion"
+samtools flagstat some_converted.bam
+
+echo "Step 9: Sort BAM"
+samtools sort -O bam -o some_sorted.bam some_converted.bam
+
+echo "Step 10: Check stats after sorting"
+samtools flagstat some_sorted.bam
+
+echo "Step 11: Index BAM"
+samtools index some_sorted.bam
+
+
+#################################################################
+# Marking Duplicates
+#################################################################
+
+echo "Step 12: Mark duplicates with Picard"
+java -jar $PATH/picard.jar MarkDuplicates \
+    -I some_sorted.bam \
+    -O some_sorted.markdup.bam \
+    -R $REF.fa \
+    -M some_sorted.picard_markdup_raw_metrics \
+    --CREATE_INDEX false \
+    --MAX_RECORDS_IN_RAM 1000 \
+    --SORTING_COLLECTION_SIZE_RATIO 0.15 \
+    --ASSUME_SORT_ORDER coordinate \
+    --OPTICAL_DUPLICATE_PIXEL_DISTANCE 2500
+
+echo "Step 13: Check stats after duplicate marking"
+samtools flagstat some_sorted.markdup.bam
+
+echo "Step 14: Index marked BAM"
+samtools index -@ 4 some_sorted.markdup.bam
+
+echo "Step 15: Collect insert size metrics"
+java -jar $PATH/picard.jar CollectInsertSizeMetrics \
+      I=some_sorted.markdup.bam \
+      O=some_sorted.markdup_size_metrics.txt \
+      H=some_sorted.markdup_size_histogram.pdf \
+      M=0.5
+
+echo "Step 16 (Optional): Collect alignment summary metrics"
+java -jar $PATH/picard.jar CollectAlignmentSummaryMetrics \
+    R=$REF.fa \
+    I=some_sorted.markdup.bam \
+    O=some_sorted.markdup.txt \
+    HISTOGRAM_FILE=some_sorted.markdup_histogram.pdf \
+    IS_BISULFITE_SEQUENCED=true
+
+echo "Step 17 (Optional): Collect GC bias metrics"
+java -jar $PATH/picard.jar CollectGcBiasMetrics \
+      I=some_sorted.markdup.bam \
+      O=some_sorted.markdup_gc_bias_metrics.txt \
+      CHART=some_sorted.markdup_gc_bias_metrics.pdf \
+      S=some_sorted.markdup_summary_metrics.txt \
+      R=$REF.fa
+
+
+#################################################################
+# Methylation Calling
+#################################################################
+
+echo "Step 18: Check bias with MethylDackel"
+MethylDackel mbias $REF.fa -@ 3 some_sorted.markdup.bam some_methylome
+
+echo "Step 19: Generate CpG calls"
+MethylDackel extract --minDepth 10 --maxVariantFrac 0.25 \
+  --OT X,X,X,X --OB X,X,X,X --mergeContext \
+  $REF.fa some_sorted.markdup.bam -o some_methylome
+
+echo "Step 20 (Optional): Generate methylKit file"
+MethylDackel extract --minDepth 10 -@ 3 --maxVariantFrac 0.25 \
+  --methylKit --OT X,X,X,X --OB X,X,X,X \
+  $REF.fa some_sorted.markdup.bam -o some_methylome_report
+
+echo "Step 21: Generate cytosine-level reports"
+MethylDackel extract --minDepth 10 -@ 3 --maxVariantFrac 0.25 \
+  --OT X,X,X,X --OB X,X,X,X \
+  --cytosine_report --CHH --CHG \
+  $REF.fa some_sorted.markdup.bam -o some_methylome_report
+
+echo "=== Bash part complete. Continue with R script (step 22) ==="
