@@ -1,0 +1,201 @@
+#################################################################
+# DNA Methylation Analysis Pipeline - Part 2 (R section)
+# Steps 22–61
+#################################################################
+
+# Step 22: Install required libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+install.packages("R.oo")
+BiocManager::install("methylKit")
+BiocManager::install("genomation")
+
+# Step 23: Load libraries
+library(methylKit)
+library(genomation)
+library(R.oo)
+library(dplyr)
+
+# Step 24: Set working directory
+setwd("PATH")
+
+# Step 25: Load case files
+case_files <- list("PATH_1", "PATH_2", ...)
+
+# Step 26: Define case IDs
+case_id <- list("XX", "YY", ...)
+
+# Step 27: Load control files
+control_files <- list("PATH_1", "PATH_2", ...)
+
+# Step 28: Define control IDs
+control_id <- list("XX", "YY", ...)
+
+# Step 29: Combine IDs
+sample_id <- c(case_id, control_id)
+
+# Step 30: Create treatment vector
+case <- rep(1, length(case_files))
+control <- rep(0, length(control_files))
+treatment <- c(case, control)
+
+# Step 31: Combine files
+files <- c(case_files, control_files)
+
+
+#################################################################
+# Creating methylKit objects
+#################################################################
+
+# Step 32: Create methRead object
+myobj = methRead(files,
+  sample.id = sample_id,
+  assembly = "hg38",
+  treatment = treatment,
+  context = "CpG",
+  mincov = 10)
+
+# Step 33: Filter by coverage
+filtered.myobj = filterByCoverage(myobj,
+  lo.count = 10, lo.perc = NULL,
+  hi.count = NULL, hi.perc = 99.9)
+
+# Step 34: Unite CpGs present in ≥1 sample
+meth.min = unite(filtered.myobj, min.per.group = 1L)
+
+# Step 35: Create methylBase object
+methyl_base <- unite(filtered.myobj, destrand = FALSE)
+
+# Step 36: Extract data to dataframe
+methyl_base_data <- getData(methyl_base)
+
+
+#################################################################
+# Data analysis
+#################################################################
+
+# Step 37: Coverage stats
+for (i in 1:length(myobj)) {
+  cat("Sample statistics", i, ":", myobj[[i]]@sample.id, "\n")
+  getCoverageStats(myobj[[i]], plot = TRUE)
+}
+
+# Step 38: Methylation stats
+for (i in 1:length(myobj)) {
+  cat("Sample statistics", i, ":", myobj[[i]]@sample.id, "\n")
+  getMethylationStats(myobj[[i]], plot = TRUE, both.strands = FALSE)
+}
+
+# Step 39: Correlation matrix
+getCorrelation(meth.min, plot = TRUE)
+
+# Step 40: Dendrogram
+clusterSamples(meth.min, dist = "correlation", method = "ward", plot = TRUE)
+
+# Step 41: PCA screeplot
+PCASamples(meth.min, screeplot = TRUE)
+
+# Step 42: PCA plot
+PCASamples(meth.min)
+
+
+#################################################################
+# Beta-value analysis
+#################################################################
+
+# Step 43: Create empty dataframe
+beta_values <- data.frame(matrix(ncol = 0, nrow = nrow(methyl_base_data)))
+
+# Step 44: Calculate beta-values
+for (i in 1:20) {
+  numCs <- methyl_base_data[[paste0("numCs", i)]]
+  numTs <- methyl_base_data[[paste0("numTs", i)]]
+  beta <- ifelse((numCs + numTs) > 0, numCs / (numCs + numTs), NA)
+  beta_values[[paste0("beta", i)]] <- beta
+}
+
+# Step 45: Summarize beta-values
+summary_table <- sapply(beta_values, summary)
+
+# Step 46: Convert to dataframe
+summary_table <- as.data.frame(t(summary_table))
+
+# Step 47: Add column names
+colnames(summary_table) <- c("Min", "1st_Qu", "Median", "Mean", "3rd_Qu", "Max")
+
+# Step 48: Add rownames with sample IDs
+rownames(summary_table) <- sample_id
+
+# Step 49: Export summary
+write.csv(summary_table, file = "summary_table.csv", row.names = TRUE)
+
+# Step 50: Boxplot of beta-values
+boxplot(beta_values,
+  main = "Sample Beta-values",
+  xlab = "Samples",
+  ylab = "Beta-values",
+  col = "skyblue",
+  las = 2)
+
+# Step 51: Creating a vector with all mean values — needed for generating a scatterplot type of graph 
+mean <- summary_table$Mean
+
+# Step 52: Creating a scatterplot graph  
+plot(1:length(mean), mean,
+ 	type = "p",            	                  # just dots
+ 	pch = 16,              	                  # full circle
+ 	col = "blue",          	                  # color
+ 	xlab = "Samples",     	                  # X axis
+ 	ylab = "Mean Beta-values",                # Y axis
+ 	main = " Mean Beta-values Dispersion",    # Title
+ 	xaxt = "n")            	                  # Hide X axis
+
+
+# Step 53: Adding samples IDs to X axis of the scatterplot graph  
+axis(1, at = 1:length(mean), labels = rownames(summary_table), las = 2)
+
+
+#################################################################
+# Differentially methylated cytosines (DMCs)
+#################################################################
+
+# Step 54: Calculate DMCs
+myDiff = calculateDiffMeth(meth.min)
+
+# Step 55: Create percent methylation matrix
+perc.meth = percMethylation(meth.min)
+
+# Step 56: Separate hyper/hypo DMCs
+myDiff.hyper = getMethylDiff(myDiff, difference = 2, qvalue = 0.01, type = "hyper")
+myDiff.hypo  = getMethylDiff(myDiff, difference = 2, qvalue = 0.01, type = "hypo")
+
+
+#################################################################
+# Tiling window analysis
+#################################################################
+
+# Step 57: Create methRead with relaxed mincov
+myobj_lowCov = methRead(files,
+  sample.id = sample_id,
+  assembly = "hg38",
+  treatment = treatment,
+  context = "CpG",
+  mincov = 3)
+
+# Step 58: Tile methylation counts (1kb windows, min 10 CpGs)
+tiles = tileMethylCounts(myobj_lowCov,
+  win.size = 1000, step.size = 1000, cov.bases = 10)
+
+# Step 59: Unite tiled samples
+meth_low = methylKit::unite(myobj_lowCov, destrand = FALSE)
+
+# Step 60: Calculate DMCs from tiles
+tile_diff = calculateDiffMeth(meth_low)
+
+# Step 61: Separate hyper/hypo tiles
+tile_diff_hyper = getMethylDiff(tile_diff, difference = 10, qvalue = 0.01, type = "hyper")
+tile_diff_hypo  = getMethylDiff(tile_diff, difference = 10, qvalue = 0.01, type = "hypo")
+
+#################################################################
+# End of pipeline
+#################################################################
